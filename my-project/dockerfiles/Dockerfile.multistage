@@ -1,0 +1,12 @@
+FROM rust:slim-bullseye as builder
+
+WORKDIR /usr/src/myapp
+COPY . .
+
+RUN cargo build --release
+
+FROM debian:bullseye-slim
+
+COPY --from=builder /usr/src/myapp/target/release/my-project /usr/local/bin/my-project
+
+ENTRYPOINT ["/usr/local/bin/my-project"]
