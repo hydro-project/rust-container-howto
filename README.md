@@ -97,7 +97,7 @@ To test this `Dockerfile` out, enter the `my-project/` directory and run
 docker build -f dockerfiles/Dockerfile.simple -t my-project:simple .
 ```
 
-This command uses `dockerfiles/Dockerfile.simple` as the Dockerfile that will guide the build process, and will call the resulting image `my-project` and tag it with the `simple` tag. If you didn't specify a tag here (by using `-t my-project` instead of `-t my-project:simple`), Docker would tag the resulting image with the `latest` tag.
+This command uses `dockerfiles/Dockerfile.simple` as the Dockerfile that will guide the build process, and will call the resulting image `my-project` and tag it with the `simple` tag. If you didn't specify a tag here (by using `-t my-project` instead of `-t my-project:simple`), Docker would tag the resulting image with the `latest` tag. We're using `.` (the current working directory) as Docker's build context.
 
 Once the build completes, run:
 
@@ -152,7 +152,7 @@ and
 FROM debian:bullseye-slim
 ```
 
-One thing I didn't mention before about `FROM` is that it defines a build **stage**. Each stage is its own distinct image, and one stage can copy files from another stage's topmost layer, but only the last stage in a `Dockerfile` actually gets saved. This allows us to do building and preparation of binaries in one stage, and copy only those files that we need into another, smaller stage.
+One thing I didn't mention before about `FROM` is that it defines a build **stage**. Each stage is its own distinct image, and one stage can copy files from another stage's topmost layer, but only the last stage in a `Dockerfile` actually gets saved. This allows us to build and prepare binaries in one stage, and copy only those files that we need into another, smaller stage.
 
 In this case, we're creating a temporary stage called `builder` that is based on `rust:slim-bullseye` and actually does our build. We're then creating our final stage from `debian:bullseye-slim`, and using a `COPY --from=builder` command to copy the `my-project` binary from the `builder` stage to the final stage.
 
@@ -177,3 +177,171 @@ my-project   multistage   0623c2758fa8   About a minute ago   78.6MB
 ```
 
 Note that the `simple` tag's image is 983 MB, but the `multistage` version is only 78.6 MB!
+
+## Caching Build Dependencies
+
+By introducing multi-stage builds, we've drastically reduced the container image's size, which will make it a lot faster for runtimes to pull the image. However, we've still got that `COPY . .` line there, which means that every time anything changes, we're going to have to rebuild everything.
+
+Ideally, we'd `COPY` `Cargo.toml` into a build stage, build our project's dependencies, then `COPY` `src/`and build the project. That way, we'd only have to do a full rebuild of our dependencies if the dependencies changed, and would only rebuild changes in `src/` otherwise.
+
+Unfortunately, `cargo` doesn't currently have a way of _only_ rebuilding a project's dependencies. This makes it somewhat more difficult to leverage layer caching in Rust than in languages like node.js or Python where dependencies are installed separately.
+
+There are several known ways to cache dependencies, but the cleanest I've come across is [`cargo-chef`](https://hub.docker.com/r/lukemathwalker/cargo-chef). I've summarized the example provided in [this blog post](https://www.lpalmieri.com/posts/fast-rust-docker-builds/) as `Dockerfile.dependency-cache`:
+
+```dockerfile
+FROM lukemathwalker/cargo-chef:latest-rust-slim-bullseye AS chef
+
+WORKDIR app
+
+FROM chef AS planner
+
+COPY . .
+RUN cargo chef prepare --recipe-path recipe.json
+
+FROM chef AS builder
+
+COPY --from=planner /app/recipe.json recipe.json
+RUN cargo chef cook --release --recipe-path recipe.json
+COPY . .
+RUN cargo build --release
+
+FROM debian:bullseye-slim AS runtime
+
+WORKDIR app
+COPY --from=builder /app/target/release/my-project /usr/local/bin/my-project
+
+ENTRYPOINT ["/usr/local/bin/my-project"]
+```
+
+Let's break down what's happening here one stage at a time.
+
+```dockerfile
+FROM lukemathwalker/cargo-chef:latest-rust-slim-bullseye AS chef
+
+WORKDIR app
+```
+
+The `chef` stage is a convenience; it allows us to specify the tag for the `lukemathwalker/cargo-chef` image and the working directory once and re-use it in subsequent stages. This is the first time we've seen a slash (`/`) in the name of an image; this is just like in GitHub, where the maintainer's name is before the slash and the image name is after it.
+
+```dockerfile
+FROM chef AS planner
+
+COPY . .
+RUN cargo chef prepare --recipe-path recipe.json
+```
+
+The `planner` stage is building what `cargo-chef` calls a _recipe_ (information about how to build your project's dependencies). It needs everything in the context to be able to do this, hence the `COPY . .` command.
+
+```dockerfile
+FROM chef AS builder
+
+COPY --from=planner /app/recipe.json recipe.json
+RUN cargo chef cook --release --recipe-path recipe.json
+COPY . .
+RUN cargo build --release
+```
+
+The recipe built in the `planner` stage gets passed to the `builder` stage. Then, we use `cargo-chef` and the recipe to "cook" the project's dependencies. Finally, we `COPY` the whole context in and run `cargo build` as normal.
+
+Note that the `COPY . .` command comes _after_ the dependency cooking process, but before the final build. This means that dependencies will only be rebuilt if the recipe changes. If the recipe remains the same, all commands in the stage prior to `COPY . .` will be cached.
+
+### Let's Try It!
+
+To prove to ourselves that this approach works, let's enter the `my-project/` directory and run the following:
+
+```bash
+docker build -f dockerfiles/Dockerfile.multistage -t my-project:multistage .
+docker build -f dockerfiles/Dockerfile.dependency-cache -t my-project:dependency-cache .
+```
+
+This will build both the multi-stage and dependency-caching variants of our Dockerfile, producing two separate tagged images.
+
+Now, let's open `my-project/src/main.rs` and change line 2 from
+
+```rust
+println!("Hello, world!");
+```
+
+to
+
+```rust
+println!("Hello, universe!");
+```
+
+and save it.
+
+Now, let's run the multistage build again:
+
+```bash
+docker build -f dockerfiles/Dockerfile.multistage -t my-project:multistage .
+```
+
+You should see output that looks something like this:
+
+```bash
+ => [internal] load build definition from Dockerfile.multistage                                                                                        0.0s
+ => => transferring dockerfile: 48B                                                                                                                    0.0s
+ => [internal] load .dockerignore                                                                                                                      0.0s
+ => => transferring context: 2B                                                                                                                        0.0s
+ => [internal] load metadata for docker.io/library/debian:bullseye-slim                                                                                0.5s
+ => [internal] load metadata for docker.io/library/rust:slim-bullseye                                                                                  0.0s
+ => [builder 1/4] FROM docker.io/library/rust:slim-bullseye                                                                                            0.0s
+ => CACHED [stage-1 1/2] FROM docker.io/library/debian:bullseye-slim@sha256:98d3b4b0cee264301eb1354e0b549323af2d0633e1c43375d0b25c01826b6790           0.0s
+ => [internal] load build context                                                                                                                      0.0s
+ => => transferring context: 89.05kB                                                                                                                   0.0s
+ => CACHED [builder 2/4] WORKDIR /usr/src/myapp                                                                                                        0.0s
+ => [builder 3/4] COPY . .                                                                                                                             0.0s
+ => [builder 4/4] RUN cargo build --release                                                                                                            0.5s
+ => [stage-1 2/2] COPY --from=builder /usr/src/myapp/target/release/my-project /usr/local/bin/my-project                                               0.0s
+ => exporting to image                                                                                                                                 0.0s
+ => => exporting layers                                                                                                                                0.0s
+ => => writing image sha256:698a93e68703b0dbe96e425b0950b65f8839bdc778420b916fbaec9423c14ad4                                                           0.0s
+ => => naming to docker.io/library/my-project:multistage                                                                                               0.0s
+```
+
+Notice that only two layers were cached here (noted by the `CACHED` in that layer's build line): the load of the base image, and the `WORKDIR` command. Everything else had to be re-run.
+
+Now, let's try it with the dependency-caching version:
+
+```bash
+docker build -f dockerfiles/Dockerfile.dependency-cache -t my-project:dependency-cache .
+```
+
+You should see something like this:
+
+```bash
+ => [internal] load build definition from Dockerfile.dependency-cache                                                                                  0.0s
+ => => transferring dockerfile: 553B                                                                                                                   0.0s
+ => [internal] load .dockerignore                                                                                                                      0.0s
+ => => transferring context: 2B                                                                                                                        0.0s
+ => [internal] load metadata for docker.io/library/debian:bullseye-slim                                                                                0.5s
+ => [internal] load metadata for docker.io/lukemathwalker/cargo-chef:latest-rust-slim-bullseye                                                         0.6s
+ => [internal] load build context                                                                                                                      0.0s
+ => => transferring context: 3.23kB                                                                                                                    0.0s
+ => [runtime 1/3] FROM docker.io/library/debian:bullseye-slim@sha256:98d3b4b0cee264301eb1354e0b549323af2d0633e1c43375d0b25c01826b6790                  0.0s
+ => [chef 1/2] FROM docker.io/lukemathwalker/cargo-chef:latest-rust-slim-bullseye@sha256:ed9b0667577e841fc717b9f680e2cc5b09eabc58f5598216b862191bb60f  0.0s
+ => CACHED [chef 2/2] WORKDIR app                                                                                                                      0.0s
+ => [planner 1/2] COPY . .                                                                                                                             0.0s
+ => [planner 2/2] RUN cargo chef prepare --recipe-path recipe.json                                                                                     0.2s
+ => CACHED [builder 1/4] COPY --from=planner /app/recipe.json recipe.json                                                                              0.0s
+ => CACHED [builder 2/4] RUN cargo chef cook --release --recipe-path recipe.json                                                                       0.0s
+ => [builder 3/4] COPY . .                                                                                                                             0.0s
+ => [builder 4/4] RUN cargo build --release                                                                                                            0.6s
+ => CACHED [runtime 2/3] WORKDIR app                                                                                                                   0.0s
+ => [runtime 3/3] COPY --from=builder /app/target/release/my-project /usr/local/bin/my-project                                                         0.0s
+ => exporting to image                                                                                                                                 0.0s
+ => => exporting layers                                                                                                                                0.0s
+ => => writing image sha256:96a64137f2080179af422e58fe2121fc4b1efdc7c687c9b9d3bddb1933ef5342                                                           0.0s
+ => => naming to docker.io/library/my-project:dependency-cache                                                                                         0.0s
+```
+
+Note that the first two phases of the `builder` stage were cached, which is what we expected.
+
+Of course, the program we've written here is about the simplest Rust program you can write; you'd see much more time savings if you were running something real.
+
+## Multi-Platform Builds
+
+So far, we've been assuming that you're building for the same architecture that your system is running. What if you want to build for multiple platforms at the same time?
+
+The answer is that it's doable, but it's complicated.
+
