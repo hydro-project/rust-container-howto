@@ -1,0 +1,8 @@
+FROM rust:latest
+
+WORKDIR /usr/src/myapp
+COPY . .
+
+RUN cargo build --release
+
+ENTRYPOINT ["/usr/src/myapp/target/release/my-project"]
