@@ -1,12 +1,16 @@
 # HOWTO: Package Rust Programs into Containers
 
+Building containers is kind of a pain in the neck, but I hope that this document and its accompanying artifacts will make that process a little easier.
+
+If you don't care about any of this background and just want to check out the Dockerfiles, take a look [here](https://github.com/hydro-project/rust-container-howto/tree/main/my-project/dockerfiles). They're not a completely cut-and-paste solution, but they should get you pretty far toward packing your Rust project into a container.
+
 ## What is a container?
 
-Containers are a way of packaging a program, its dependencies, and its runtime environment in a language-agnostic and portable way. It’s also a sandbox that prevents the program from scribbling all over the filesystem of the system it’s running on, and a way of limiting the compute resources that the program can use. You can also argue that its registry system makes it something of a package manager for arbitrary software artifacts.
+Containers are a way of packaging a program, its dependencies, and its runtime environment in a language-agnostic and portable way. They're also a sandbox that prevents the program from scribbling all over the filesystem of the system it’s running on or communicating with processes that it shouldn't. They're _also_ a way of limiting the compute resources that the program can use. You can also argue that its registry system also makes it something of a package manager for arbitrary software artifacts.
 
-The idea was popularized by some folks at a platform-as-a-service company called dotCloud, who needed a lightweight way of isolating its customers’ workloads from one another. They created a container management and construction system called Docker, and went on to form a company of the same name to commercialize the technology. Whether the company did well is questionable, but the technology did incredibly well. We’ll be using Docker to build our containers.
+The idea was popularized by some folks at a platform-as-a-service company called dotCloud who needed a lightweight way of isolating its customers’ workloads from one another. They created a container management and construction system called **Docker**, and went on to form a company of the same name to commercialize the technology. The company's road has been rocky, but the technology did incredibly well. We’ll be using Docker to build our containers.
 
-The technological underpinnings of containers (namespaces, cgroups and union mount filesystems) have been part of Linux for a long time. You could even look at containers as the next logical step from things like chroot jails that have been around in Unix-derived operating systems since the early 1980s.
+The technological underpinnings of containers (namespaces, cgroups and union mount filesystems) have been part of Linux for a long time. You could even look at containers as the next logical step from things like chroot jails that have been around in Unix-derived operating systems since the early 1980s. While this is nothing new, Docker packaged all of it up in a way that was easy to use.
 
 ## Why does Hydroplane use containers?
 
@@ -14,27 +18,27 @@ Hydroplane uses containers because virtually every runtime that Hydroplane eithe
 
 You might argue that packaging a zip file and pushing it to an object store like S3 or GCS would accomplish the same thing for the Hydro project’s purposes, and you might be right. Once you start thinking through what it would take to actually implement that process end-to-end across a wide variety of runtimes, however, you’ll find that you’re backing into a lot of the same stuff that containers will already give you.
 
-Building containers is kind of a pain in the neck, but I hope that this document and its accompanying artifacts will make that process a little easier.
-
 ## How does Docker work?
 
 In order for what I’m about to describe to be less mysterious, it’s important to understand some basics about how container construction works. You can skip this section if you’re already familiar with Docker.
 
-Docker builds container **images**. Container images are just filesystems, packaged in a particular way that allows for reuse and extension. Images consist of **layers**, each of which is a read-only filesystem image that’s transparently overlaid on top of all the layers below it. Since every image is constructed of layers, the author of a container image can re-use the layers that someone else wrote in the past through the use of a base image. When Docker constructs a layer, it also constructs a content-based hash of that layer, which makes it possible to cache layers that have already been built.
+Docker builds container **images**. Container images are just filesystems, packaged in a particular way that allows for reuse and extension, with some additional metadata attached. Images consist of **layers**, each of which is a read-only filesystem image that’s transparently overlaid on top of all the layers below it. Since every image is constructed of layers, the author of a container image can re-use the layers that someone else wrote in the past through the use of a **base image**. When Docker constructs a layer, it also constructs a content-based hash of that layer, which makes it possible to cache layers that have already been built.
 
-This layering principle extends to runtime as well. When a container runs, it adds one additional read-write layer to the top of its image’s read-only stack of layers, and runs a program (called the container’s **entrypoint**) in the resulting read-write filesystem.
+This layering principle extends to runtime as well. When a container runs, it adds one additional read-write layer to the top of its image’s read-only stack of layers, and runs a program (called the container’s **entrypoint**) in the resulting read-write filesystem. When the container is deleted, that read-write filesystem is deleted along with it.
 
-A container image is defined in a `Dockerfile`. This file consists of a collection of steps, each of which will create a new layer. It can also define the container’s entrypoint, although you can also specify a custom entrypoint at runtime.
+A container's entrypoint and its children run in their own namespace, which isolates them from the rest of the processes running on the host system. The container's access to the host's resources (CPU, memory, devices, etc) can be controlled via cgroups.
 
-In order for someone to run a Docker image, they need a copy of its constituent layers. When you build a container image on your local system, you’ve now got that image’s layers, and the image is immediately runnable by your Docker installation. If you want to share that image with someone else, or run it somewhere else, you need to send a copy of its layers there. This is where **registries** come in. You can think of a registry like a git repository, except for filesystem layers instead of software revisions.
+A container image is defined in a **`Dockerfile`**. This file consists of a collection of steps, each of which will create a new layer. It can also define the container’s entrypoint, although you can also specify a custom entrypoint at runtime. We'll look at `Dockerfile`s in much more detail in a moment.
 
-A registry is just a collection of images, each of which has a name and (optionally) a tag that differentiates it from other versions with the same name. You send images to a registry by pushing them, and retrieve images from a registry by pulling them. In this sense, it's very similar to both git repositories and package registries like `crates.io`.
+In order for someone to run a Docker image, they need a copy of its constituent layers. When you build a container image on your local system, you’ve now got that image’s layers, and the image is immediately runnable by your Docker installation. If you want to run that image on another system, you need to send that system a copy of the image's layers. This is where **registries** come in.
+
+A registry is just a collection of images, each of which has a name and (optionally) a tag that differentiates it from other versions with the same name. Each image also keeps track of the content-based hashes of each of its layers. You send images to a registry by pushing them, and retrieve images from a registry by pulling them. In this sense, it's very similar to both git repositories and package registries like `crates.io`; it's just synchronizing layers instead of code revisions or crates.
 
 The most popular registry by far is [DockerHub](https://hub.docker.com/). Every major cloud provider also has their own private registry solutions: AWS has [Elastic Container Registry](https://aws.amazon.com/ecr/), GCP has [Google Cloud Container Registry](https://cloud.google.com/container-registry), and Azure has [Azure Container Registry](https://azure.microsoft.com/en-us/products/container-registry). GitHub also provides both public and private registries via [GitHub Packages](https://github.com/features/packages).
 
 ## How Do I Containerize My Rust Program?
 
-To containerize your Rust program, we’ll want to build a Dockerfile for it. This repo contains a couple examples of how to build a Docker image containing a "hello world" Rust program. We'll look at each of these examples in turn.
+To containerize your Rust program, we’ll want to build a `Dockerfile` for it. This repo contains a couple examples of how to build a Docker image containing an example "hello world" Rust program (created with `cargo new my-project`). We'll look at each of these examples in turn.
 
 The example project can be found in [`my-project/`](/tree/main/my-project). That project contains a few `Dockerfile`s, in [`my-project/dockerfiles`](/tree/main/my-project/dockerfiles). These `Dockerfile`s all accomplish the same thing -- they build a container that will run the `my-project` binary -- but they do so in different ways.
 
@@ -121,7 +125,7 @@ Another problem with this container image is that it's carrying around a lot mor
 
 ## Multi-Stage Builds for Smaller Images
 
-Here's a slightly more complicated `Dockerfile` [`Dockerfile.multistage`](/blob/main/my-project/dockerfiles/Dockerfile.multistage) that will make the resulting image significantly smaller:
+Here's a slightly more complicated `Dockerfile` ([`Dockerfile.multistage`](/blob/main/my-project/dockerfiles/Dockerfile.multistage)) that will make the resulting image significantly smaller:
 
 ```dockerfile
 FROM rust:slim-bullseye as builder
@@ -152,7 +156,7 @@ and
 FROM debian:bullseye-slim
 ```
 
-One thing I didn't mention before about `FROM` is that it defines a build **stage**. Each stage is its own distinct image, and one stage can copy files from another stage's topmost layer, but only the last stage in a `Dockerfile` actually gets saved. This allows us to build and prepare binaries in one stage, and copy only those files that we need into another, smaller stage.
+One thing I didn't mention before about `FROM` is that it defines a build **stage**. Each stage builds its own distinct image. A stage can copy files from the previous stage's topmost layer. When the build is done, only the last stage in a `Dockerfile` actually gets saved; this allows us to build and prepare binaries in one stage and copy only those files that we need into a subsequent, smaller stage.
 
 In this case, we're creating a temporary stage called `builder` that is based on `rust:slim-bullseye` and actually does our build. We're then creating our final stage from `debian:bullseye-slim`, and using a `COPY --from=builder` command to copy the `my-project` binary from the `builder` stage to the final stage.
 
@@ -186,7 +190,7 @@ Ideally, we'd `COPY` `Cargo.toml` into a build stage, build our project's depend
 
 Unfortunately, `cargo` doesn't currently have a way of _only_ rebuilding a project's dependencies. This makes it somewhat more difficult to leverage layer caching in Rust than in languages like node.js or Python where dependencies are installed separately.
 
-There are several known ways to cache dependencies, but the cleanest I've come across is [`cargo-chef`](https://hub.docker.com/r/lukemathwalker/cargo-chef). I've summarized the example provided in [this blog post](https://www.lpalmieri.com/posts/fast-rust-docker-builds/) as [`Dockerfile.dependency-cache`](https://github.com/hydro-project/rust-container-howto/blob/main/my-project/dockerfiles/Dockerfile.dependency-cache):
+There are several known ways to cache Rust dependencies in Docker, but the cleanest I've come across is [`cargo-chef`](https://hub.docker.com/r/lukemathwalker/cargo-chef). I've summarized the example provided in [this blog post](https://www.lpalmieri.com/posts/fast-rust-docker-builds/) as [`Dockerfile.dependency-cache`](https://github.com/hydro-project/rust-container-howto/blob/main/my-project/dockerfiles/Dockerfile.dependency-cache):
 
 ```dockerfile
 FROM lukemathwalker/cargo-chef:latest-rust-slim-bullseye AS chef
