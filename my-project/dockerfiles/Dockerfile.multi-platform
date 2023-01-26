@@ -1,0 +1,28 @@
+FROM --platform=$BUILDPLATFORM lukemathwalker/cargo-chef:latest-rust-slim-bullseye AS chef
+
+ARG TARGETOS TARGETARCH
+RUN apt-get update && apt-get install -y git
+RUN /bin/bash -c "if [ "${TARGETARCH}" == "arm64" ]; then apt-get install -y gcc-aarch64-linux-gnu ; else apt-get install -y gcc-x86-64-linux-gnu ; fi"
+
+WORKDIR app
+
+FROM chef AS planner
+
+COPY . .
+RUN cargo chef prepare --recipe-path recipe.json
+
+FROM chef AS builder
+
+ARG TARGETOS TARGETARCH
+
+COPY --from=planner /app/recipe.json recipe.json
+RUN cargo chef cook --release --recipe-path recipe.json
+COPY . .
+RUN ./scripts/build_dist_release.sh ${TARGETOS} ${TARGETARCH}
+
+FROM debian:bullseye-slim AS runtime
+
+WORKDIR app
+COPY --from=builder /app/target/*-linux-gnu/release/my-project /usr/local/bin/my-project
+
+ENTRYPOINT ["/usr/local/bin/my-project"]

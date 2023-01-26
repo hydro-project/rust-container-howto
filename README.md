@@ -345,3 +345,74 @@ So far, we've been assuming that you're building for the same architecture that 
 
 The answer is that it's doable, but it's complicated.
 
+Docker is capable of building for multiple platforms, but you need to modify your Dockerfile to make it work.
+
+I've modified the dependency-caching Dockerfile from the previous example to support multi-platform builds. You can see it at [Dockerfile.multi-platform](https://github.com/hydro-project/rust-container-howto/blob/main/my-project/dockerfiles/Dockerfile.multi-platform), but I've reproduced it below:
+
+```dockerfile
+FROM --platform=$BUILDPLATFORM lukemathwalker/cargo-chef:latest-rust-slim-bullseye AS chef
+
+ARG TARGETOS TARGETARCH
+RUN apt-get update && apt-get install -y git
+RUN /bin/bash -c "if [ "${TARGETARCH}" == "arm64" ]; then apt-get install -y gcc-aarch64-linux-gnu ; else apt-get install -y gcc-x86-64-linux-gnu ; fi"
+
+WORKDIR app
+
+FROM chef AS planner
+
+COPY . .
+RUN cargo chef prepare --recipe-path recipe.json
+
+FROM chef AS builder
+
+ARG TARGETOS TARGETARCH
+
+COPY --from=planner /app/recipe.json recipe.json
+RUN cargo chef cook --release --recipe-path recipe.json
+COPY . .
+RUN ./scripts/build_dist_release.sh ${TARGETOS} ${TARGETARCH}
+
+FROM debian:bullseye-slim AS runtime
+
+WORKDIR app
+COPY --from=builder /app/target/*-linux-gnu/release/my-project /usr/local/bin/my-project
+
+ENTRYPOINT ["/usr/local/bin/my-project"]
+```
+
+Some notable differences from the previous Dockerfile:
+
+* We've added `--platform $BUILDPLATFORM` to the `chef`, `planner`, and `builder` stages. This lets the builder know that we're doing a multi-platform build.
+* The following three lines in the first stage are new:
+
+  ```dockerfile
+  ARG TARGETOS TARGETARCH
+  RUN apt-get update && apt-get install -y git
+  RUN /bin/bash -c "if [ "${TARGETARCH}" == "arm64" ]; then apt-get install -y gcc-aarch64-linux-gnu ; else apt-get install -y gcc-x86-64-linux-gnu ; fi"
+  ```
+
+  These lines make sure that we've got a version of `glibc` that's appropriate to the architecture we're targeting.
+* The `RUN cargo build --release` line in the `builder` stage has been replaced by a call to [scripts/build_dist_release.sh](https://github.com/hydro-project/rust-container-howto/blob/main/my-project/scripts/build_dist_release.sh). This script uses `rustup` and `cargo build` to build a binary for the appropriate platform. I wrote it while trying to get the multi-platform build for the Hydroflow examples container working.
+* We're copying `target/*-linux-gnu/release/my-project` from the `builder` stage to the `runtime` stage instead of `target/release/my-project`, since this is where `cargo build` puts platform-specific targets for our architectures.
+
+### Let's Try It!
+
+Let's try building a multi-platform image ourselves.
+
+```bash
+docker buildx create --use --name hydro-builder --node hydro-builder
+docker buildx build -f dockerfiles/Dockerfile.multi-platform --builder hydro-builder --cache-to type=inline --platform linux/arm64,linux/amd64 -t my-project:multiplatform .
+
+docker buildx build -f dockerfiles/Dockerfile.multi-platform --load --platform linux/amd64 -t my-project:multiplatform-amd64 .
+docker buildx build -f dockerfiles/Dockerfile.multi-platform --load --platform linux/arm64 -t my-project:multiplatform-arm64 .
+```
+
+Now, you'll have two new images: one that's built for `amd64`, and the other that's built for `arm64`.
+
+Suppose you wanted to push both platforms' images to DockerHub using the `hydro/my-project:latest` image name and tag. Here's how you'd do that:
+
+```
+docker buildx build -f dockerfiles/Dockerfile.multi-platform --builder hydro-builder --cache-to type=inline --platform linux/arm64,linux/amd64 -t hydro/my-project:latest --push .
+```
+
+Once that was done, if you went to https://hub.docker.com/r/hydro/my-project/tags, you'd see two different image digests under the `latest` tag, one for each platform.
