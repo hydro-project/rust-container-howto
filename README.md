@@ -121,7 +121,7 @@ Another problem with this container image is that it's carrying around a lot mor
 
 ## Multi-Stage Builds for Smaller Images
 
-Here's a slightly more complicated `Dockerfile` that will make the resulting image significantly smaller:
+Here's a slightly more complicated `Dockerfile` [`Dockerfile.multistage`](/blob/main/my-project/dockerfiles/Dockerfile.multistage) that will make the resulting image significantly smaller:
 
 ```dockerfile
 FROM rust:slim-bullseye as builder
@@ -186,7 +186,7 @@ Ideally, we'd `COPY` `Cargo.toml` into a build stage, build our project's depend
 
 Unfortunately, `cargo` doesn't currently have a way of _only_ rebuilding a project's dependencies. This makes it somewhat more difficult to leverage layer caching in Rust than in languages like node.js or Python where dependencies are installed separately.
 
-There are several known ways to cache dependencies, but the cleanest I've come across is [`cargo-chef`](https://hub.docker.com/r/lukemathwalker/cargo-chef). I've summarized the example provided in [this blog post](https://www.lpalmieri.com/posts/fast-rust-docker-builds/) as `Dockerfile.dependency-cache`:
+There are several known ways to cache dependencies, but the cleanest I've come across is [`cargo-chef`](https://hub.docker.com/r/lukemathwalker/cargo-chef). I've summarized the example provided in [this blog post](https://www.lpalmieri.com/posts/fast-rust-docker-builds/) as [`Dockerfile.dependency-cache`](https://github.com/hydro-project/rust-container-howto/blob/main/my-project/dockerfiles/Dockerfile.dependency-cache):
 
 ```dockerfile
 FROM lukemathwalker/cargo-chef:latest-rust-slim-bullseye AS chef
